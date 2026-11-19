@@ -1,0 +1,23 @@
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hifox-daemon
+    container_name: hifox-daemon
+    restart: unless-stopped
+    environment:
+      # Registration only; existing installs reuse the named HiFox volume.
+      INSTALL_TOKEN: ${INSTALL_TOKEN:-}
+    volumes:
+      - hifox-config:/root/.hifox
+      - ./data/cc-switch:/root/.cc-switch
+      - ./data/gh:/root/.config/gh
+      # Keep live configurations written by CC-Switch as well as its database.
+      - ./data/claude:/root/.claude
+      - ./data/codex:/root/.codex
+      - ./data/gemini:/root/.gemini # Also contains agy settings, not its keyring.
+      - ./data/codebuddy:/root/.codebuddy # Native CodeBuddy configuration.
+
+volumes:
+  hifox-config:
