@@ -1,0 +1,316 @@
+name: Build Multi-Arch Images and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "可选：输入新版本号（如 v1.0.1）以自动打 Tag 并发版；留空则仅刷新 latest / slim 镜像"
+        required: false
+        default: ""
+        type: string
+      no_cache:
+        description: "强制拉取上游最新版的 HiFox / CC-Switch / Node.js"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.variant }} - ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - full
+          - slim
+        platform:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare image context
+        id: prep
+        run: |
+          repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          with_gui="true"
+          if [ "${{ matrix.variant }}" = "slim" ]; then
+            with_gui="false"
+          fi
+          cachebust="1"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
+            cachebust="$(date +%s)"
+          fi
+          echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+          echo "with_cc_switch=${with_gui}" >> "$GITHUB_OUTPUT"
+          echo "cachebust=${cachebust}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.prep.outputs.image }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.platform.arch }}
+          pull: true
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            WITH_CC_SWITCH=${{ steps.prep.outputs.with_cc_switch }}
+            CACHEBUST=${{ steps.prep.outputs.cachebust }}
+          outputs: type=image,name=${{ steps.prep.outputs.image }},push=true,push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.platform.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          printf '%s' "${{ steps.build.outputs.digest }}" > "${{ runner.temp }}/digests/${{ matrix.variant }}-${{ matrix.platform.arch }}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.variant }}-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish Manifests and GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version and image repository
+        id: info
+        run: |
+          repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repo_lc}"
+          tag=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [ -n "${{ inputs.release_tag }}" ]; then
+            raw_tag="${{ inputs.release_tag }}"
+            case "${raw_tag}" in
+              v*) tag="${raw_tag}" ;;
+              *) tag="v${raw_tag}" ;;
+            esac
+            if ! git rev-parse "${tag}" >/dev/null 2>&1; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag -a "${tag}" -m "chore(release): 发布 ${tag}"
+              git push origin "${tag}"
+            fi
+          fi
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub (optional)
+        if: ${{ vars.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        id: manifests
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.info.outputs.image }}"
+          TAG="${{ steps.info.outputs.tag }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
+
+          FULL_AMD64="$(cat "${{ runner.temp }}/digests/full-amd64")"
+          FULL_ARM64="$(cat "${{ runner.temp }}/digests/full-arm64")"
+          SLIM_AMD64="$(cat "${{ runner.temp }}/digests/slim-amd64")"
+          SLIM_ARM64="$(cat "${{ runner.temp }}/digests/slim-arm64")"
+
+          FULL_TAGS=("-t" "${IMAGE}:latest")
+          SLIM_TAGS=("-t" "${IMAGE}:slim")
+
+          if [ -n "${TAG}" ]; then
+            CLEAN_VER="${TAG#v}"
+            FULL_TAGS+=("-t" "${IMAGE}:${TAG}" "-t" "${IMAGE}:${CLEAN_VER}")
+            SLIM_TAGS+=("-t" "${IMAGE}:${TAG}-slim" "-t" "${IMAGE}:${CLEAN_VER}-slim")
+            if [[ "${CLEAN_VER}" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+              MAJOR_MINOR="${BASH_REMATCH[1]}"
+              FULL_TAGS+=("-t" "${IMAGE}:${MAJOR_MINOR}")
+              SLIM_TAGS+=("-t" "${IMAGE}:${MAJOR_MINOR}-slim")
+            fi
+          fi
+
+          if [ -n "${{ vars.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            DH_IMAGE="${{ vars.DOCKERHUB_USERNAME }}/hifox-docker"
+            FULL_TAGS+=("-t" "${DH_IMAGE}:latest")
+            SLIM_TAGS+=("-t" "${DH_IMAGE}:slim")
+            if [ -n "${TAG}" ]; then
+              FULL_TAGS+=("-t" "${DH_IMAGE}:${TAG}")
+              SLIM_TAGS+=("-t" "${DH_IMAGE}:${TAG}-slim")
+            fi
+          fi
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
+            --annotation "index:org.opencontainers.image.description=HiFox Docker Node Environment with Official CC-Switch Web GUI" \
+            "${FULL_TAGS[@]}" \
+            "${IMAGE}@${FULL_AMD64}" \
+            "${IMAGE}@${FULL_ARM64}"
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
+            --annotation "index:org.opencontainers.image.description=HiFox Docker Node Environment (Slim Headless)" \
+            "${SLIM_TAGS[@]}" \
+            "${IMAGE}@${SLIM_AMD64}" \
+            "${IMAGE}@${SLIM_ARM64}"
+
+          FULL_INDEX_DIGEST="sha256:$(docker buildx imagetools inspect "${IMAGE}:latest" --raw | sha256sum | awk '{print $1}')"
+          SLIM_INDEX_DIGEST="sha256:$(docker buildx imagetools inspect "${IMAGE}:slim" --raw | sha256sum | awk '{print $1}')"
+
+          echo "full_amd64=${FULL_AMD64}" >> "$GITHUB_OUTPUT"
+          echo "full_arm64=${FULL_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "full_digest=${FULL_INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "slim_digest=${SLIM_INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract built-in component versions
+        id: versions
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.info.outputs.image }}"
+          FULL_AMD64="${{ steps.manifests.outputs.full_amd64 }}"
+          VERS_JSON="$(docker run --rm --entrypoint cat "${IMAGE}@${FULL_AMD64}" /etc/hifox-versions.json)"
+          echo "Versions JSON: ${VERS_JSON}"
+          echo "hifox=$(printf '%s' "${VERS_JSON}" | jq -r '.hifox')" >> "$GITHUB_OUTPUT"
+          echo "cc_switch=$(printf '%s' "${VERS_JSON}" | jq -r '.cc_switch')" >> "$GITHUB_OUTPUT"
+          echo "node=$(printf '%s' "${VERS_JSON}" | jq -r '.node')" >> "$GITHUB_OUTPUT"
+          echo "npm=$(printf '%s' "${VERS_JSON}" | jq -r '.npm')" >> "$GITHUB_OUTPUT"
+          echo "gh=$(printf '%s' "${VERS_JSON}" | jq -r '.gh')" >> "$GITHUB_OUTPUT"
+
+      - name: Package deployment assets and publish GitHub Release
+        if: ${{ steps.info.outputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.info.outputs.tag }}"
+          IMAGE="${{ steps.info.outputs.image }}"
+          FULL_DIGEST="${{ steps.manifests.outputs.full_digest }}"
+          SLIM_DIGEST="${{ steps.manifests.outputs.slim_digest }}"
+
+          STAGE_DIR="dist/hifox-docker-${TAG}"
+          mkdir -p "${STAGE_DIR}"
+
+          sed "s|ghcr.io/waset/hifox-docker:latest|${IMAGE}:${TAG}|g" docker-compose.yml > "${STAGE_DIR}/docker-compose.yml"
+          sed "s|ghcr.io/waset/hifox-docker:latest|${IMAGE}:${TAG}|g" .env.example > "${STAGE_DIR}/.env.example"
+          cp README.md "${STAGE_DIR}/README.md"
+
+          cp "${STAGE_DIR}/docker-compose.yml" "dist/docker-compose.yml"
+          cp "${STAGE_DIR}/.env.example" "dist/.env.example"
+
+          tar -C dist -czf "dist/hifox-docker-deploy-${TAG}.tar.gz" "hifox-docker-${TAG}"
+          (cd dist && zip -rq "hifox-docker-deploy-${TAG}.zip" "hifox-docker-${TAG}")
+          (cd dist && sha256sum \
+            "hifox-docker-deploy-${TAG}.tar.gz" \
+            "hifox-docker-deploy-${TAG}.zip" \
+            "docker-compose.yml" \
+            ".env.example" > SHA256SUMS.txt)
+
+          PREV_TAG="$(git tag --sort=-v:refname | grep -E '^v[0-9]+' | grep -Fxv "${TAG}" | head -n 1 || true)"
+          if [ -n "${PREV_TAG}" ]; then
+            LOG_RANGE="${PREV_TAG}..${TAG}"
+          else
+            LOG_RANGE="${TAG}"
+          fi
+
+          COMMITS="$(git log "${LOG_RANGE}" --no-merges --pretty=format:'- %s (`%h`)')"
+
+          {
+            printf '## 🐳 Docker 镜像地址（支持 `linux/amd64` & `linux/arm64`）\n\n'
+            printf '| 版本类型 | 镜像地址（固定版本） | 镜像地址（滚动标签） | 多架构 Manifest Digest |\n'
+            printf '| :--- | :--- | :--- | :--- |\n'
+            printf '| **全功能版**（含官方 CC-Switch Web GUI） | `%s:%s` | `%s:latest` | `%s` |\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${FULL_DIGEST}"
+            printf '| **精简版**（纯无头节点，无 GUI 依赖） | `%s:%s-slim` | `%s:slim` | `%s` |\n\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${SLIM_DIGEST}"
+            printf '### 一键拉取\n\n```bash\n# 全功能版（推荐）\ndocker pull %s:%s\n\n# 精简无 GUI 版\ndocker pull %s:%s-slim\n```\n\n---\n\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${TAG}"
+            printf '## 📦 内置核心组件版本快照\n\n'
+            printf '| 组件 | 版本 |\n| :--- | :--- |\n'
+            printf '| **HiFox CLI** | `%s` |\n' "${{ steps.versions.outputs.hifox }}"
+            printf '| **CC-Switch (官方桌面版)** | `%s` *(仅全功能版内置)* |\n' "${{ steps.versions.outputs.cc_switch }}"
+            printf '| **Node.js / npm** | `%s` / `%s` |\n' "${{ steps.versions.outputs.node }}" "${{ steps.versions.outputs.npm }}"
+            printf '| **GitHub CLI (`gh`)** | `%s` |\n\n---\n\n' "${{ steps.versions.outputs.gh }}"
+            printf '## 🚀 快速部署（使用本 Release 附件）\n\n```bash\n'
+            printf 'curl -fsSLO https://github.com/%s/releases/download/%s/hifox-docker-deploy-%s.tar.gz\n' "${{ github.repository }}" "${TAG}" "${TAG}"
+            printf 'tar -xzf hifox-docker-deploy-%s.tar.gz\ncd hifox-docker-%s\ncp .env.example .env\n# 编辑 .env 填入 INSTALL_TOKEN 后启动：\ndocker compose up -d\n```\n\n---\n\n' "${TAG}" "${TAG}"
+            printf '## 📝 变更记录（Changelog）\n\n%s\n' "${COMMITS}"
+          } > dist/release-notes.md
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --title "${TAG}" --notes-file dist/release-notes.md
+            gh release upload "${TAG}" \
+              "dist/hifox-docker-deploy-${TAG}.tar.gz" \
+              "dist/hifox-docker-deploy-${TAG}.zip" \
+              "dist/docker-compose.yml" \
+              "dist/.env.example" \
+              "dist/SHA256SUMS.txt" \
+              --clobber
+          else
+            gh release create "${TAG}" \
+              "dist/hifox-docker-deploy-${TAG}.tar.gz" \
+              "dist/hifox-docker-deploy-${TAG}.zip" \
+              "dist/docker-compose.yml" \
+              "dist/.env.example" \
+              "dist/SHA256SUMS.txt" \
+              --title "${TAG}" \
+              --notes-file dist/release-notes.md
+          fi
