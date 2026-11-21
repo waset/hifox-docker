@@ -1,29 +1,30 @@
 services:
   hifox:
-    image: ${HIFOX_IMAGE:-ghcr.io/waset/hifox-docker:latest}
+    # 主镜像源：Docker Hub（网络不通时可切换备用源：ghcr.io/waset/hifox-docker:latest）
+    image: ${HIFOX_IMAGE:-waset/hifox-docker:latest}
     container_name: ${HIFOX_CONTAINER_NAME:-hifox}
-    # Fixed hostname ensures hostname-salted encrypted OAuth tokens survive container recreation.
+    # 固定容器主机名，确保依赖主机名加密的 CLI OAuth 令牌在容器重建后不失效
     hostname: ${HIFOX_HOSTNAME:-hifox-daemon}
     shm_size: "1gb"
     restart: unless-stopped
     ports:
       - "${CC_SWITCH_PORT:-3000}:3000"
     environment:
-      # Required on first start only; persisted in hifox-config volume afterwards.
+      # 仅首次启动注册节点时必填，注册状态持久保存在 hifox-config 卷中
       INSTALL_TOKEN: ${INSTALL_TOKEN:-}
-      # Toggle Official CC-Switch Web GUI at runtime (true / false).
+      # 运行期动态开关内置官方 CC-Switch Web GUI（true / false）
       ENABLE_CC_SWITCH: ${ENABLE_CC_SWITCH:-true}
       CC_SWITCH_VNC_PASSWORD: ${CC_SWITCH_VNC_PASSWORD:-}
-      # Optional comma-separated Agent CLIs to install into persisted /root/.local on startup
-      # Presets: claude, codex, gemini, codebuddy, agy, opencode (or any npm package name)
+      # 可选：启动时自动安装至 /root/.local 的 Agent CLI 列表，逗号分隔
+      # 支持内置简称：claude, codex, gemini, codebuddy, agy, opencode（或任意 npm 包名）
       AGENT_CLIS: ${AGENT_CLIS:-}
       AGENT_CLIS_UPDATE: ${AGENT_CLIS_UPDATE:-false}
       GEMINI_FORCE_FILE_STORAGE: "true"
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      # Persist all runtime-installed Agent CLIs (/root/.local) and login states (gh, claude, codex, gemini, ssh, etc.)
+      # 持久化所有运行时安装的 Agent CLI（/root/.local）与各工具登录态（gh、claude、codex、gemini、ssh 等）
       - ./data:/root
-      # Native Linux ext4 volumes protect HiFox node state & CC-Switch SQLite DB from host filesystem lock issues
+      # 原生 Linux ext4 命名卷，保护 HiFox 节点状态与 CC-Switch SQLite 数据库不受宿主机文件系统锁影响
       - hifox-config:/root/.hifox
       - cc-switch-data:/root/.cc-switch
 

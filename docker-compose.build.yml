@@ -1,4 +1,4 @@
-# Optional override for building from local Dockerfile instead of pulling prebuilt GHCR images:
+# 可选覆盖配置：基于本地 Dockerfile 构建而非拉取远程预构建镜像时使用：
 # docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
   hifox:

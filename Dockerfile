@@ -16,7 +16,7 @@ ENV HOME="/root" \
     LANG="C.UTF-8" \
     PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 1. Base runtime tools and dynamically resolved latest LTS Node.js
+# 1. 基础运行依赖与动态获取的最新 LTS 版 Node.js
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
      ca-certificates \
@@ -40,7 +40,7 @@ RUN apt-get update \
   && curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
      | tar -xJ --strip-components=1 -C /usr/local/
 
-# 2. GitHub CLI (latest) from the official signed APT repository
+# 2. 官方 APT 签名源安装最新版 GitHub CLI (gh)
 RUN install -d -m 0755 /etc/apt/keyrings \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -51,12 +51,13 @@ RUN install -d -m 0755 /etc/apt/keyrings \
   && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-# 3. HiFox CLI (latest) installed into /usr/local/bin so mounting /root never shadows it
+# 3. 安装最新版 HiFox CLI 至 /usr/local/bin（避免挂载 /root 时被遮蔽）
 RUN NPM_CONFIG_PREFIX="/usr/local" curl -fsSL https://file-assets.hifox.com/download/install.sh | bash \
   && install -m 0755 "$(readlink -f /root/.local/bin/hifox)" /usr/local/bin/hifox \
   && rm -rf /root/.local /root/.npm /root/.cache /root/.config
 
-# 4. Optional Official CC-Switch Desktop (farion1231/cc-switch latest) + Web GUI stack
+# 4. 按需构建官方版 CC-Switch 桌面端 (farion1231/cc-switch latest) 与 Web GUI 环境
+#    故意不安装 gnome-keyring，防止 CLI 将登录凭证写入容器临时内存环导致重启丢失
 RUN set -eu; \
   if [ "${WITH_CC_SWITCH}" = "true" ]; then \
     apt-get update; \
@@ -123,7 +124,7 @@ RUN set -eu; \
     rm -rf /var/lib/apt/lists/*; \
   fi
 
-# 5. Shell environment profile & built-in component version manifest
+# 5. 登录态 Shell 环境变量导出与内置组件版本清单生成
 RUN cat >/etc/profile.d/hifox-env.sh <<'EOF'
 export HOME="/root"
 export NPM_CONFIG_PREFIX="/root/.local"
@@ -150,7 +151,7 @@ RUN set -eu; \
   if dpkg-query -W -f='${Version}' cc-switch >/dev/null 2>&1; then \
     cc_ver="$(dpkg-query -W -f='${Version}' cc-switch)"; \
   else \
-    cc_ver="none (slim)"; \
+    cc_ver="-"; \
   fi; \
   jq -n \
     --arg node "${node_ver}" \
@@ -162,7 +163,7 @@ RUN set -eu; \
     >/etc/hifox-versions.json \
   && cat /etc/hifox-versions.json
 
-# 6. Persistence, on-demand Agent CLI installer, GUI runner, and unified entrypoint
+# 6. 登录态持久化初始化、按需 Agent CLI 安装器、GUI 守护进程与统一入口脚本
 RUN cat >/usr/local/bin/hifox-init-persistence <<'EOF'
 #!/bin/sh
 set -eu
@@ -181,7 +182,7 @@ mkdir -p \
   /root/.ssh
 chmod 700 /root/.ssh
 
-# Seed default shell rc files when /root is mounted from an empty host directory
+# 当宿主机空目录首次挂载到 /root 时补齐默认 Shell 配置文件
 if [ ! -f /root/.bashrc ] && [ -f /etc/skel/.bashrc ]; then
   cp /etc/skel/.bashrc /root/.bashrc
 fi
@@ -189,7 +190,7 @@ if [ ! -f /root/.profile ] && [ -f /etc/skel/.profile ]; then
   cp /etc/skel/.profile /root/.profile
 fi
 
-# Persist /etc/machine-id across container rebuilds so device-bound encrypted tokens stay valid
+# 持久化 /etc/machine-id，确保依赖机器指纹加密的 CLI 登录态在容器重建后不失效
 MACHINE_ID_FILE="/root/.config/machine-id"
 if [ ! -s "${MACHINE_ID_FILE}" ]; then
   if [ -s /etc/machine-id ]; then
@@ -203,7 +204,7 @@ if [ -d /var/lib/dbus ]; then
   cp "${MACHINE_ID_FILE}" /var/lib/dbus/machine-id
 fi
 
-# Keep /root/.claude.json and /root/.claude/.claude.json unified for Claude Code & CC-Switch
+# 统一 /root/.claude.json 与 /root/.claude/.claude.json 供 Claude Code 和 CC-Switch 共享
 if [ ! -f /root/.claude/.claude.json ]; then
   if [ -f /root/.claude.json ] && [ ! -L /root/.claude.json ]; then
     mv /root/.claude.json /root/.claude/.claude.json
@@ -213,7 +214,7 @@ if [ ! -f /root/.claude/.claude.json ]; then
 fi
 ln -sfn /root/.claude/.claude.json /root/.claude.json
 
-# Persist Git credential helper for GitHub CLI inside /root/.gitconfig
+# 在持久化的 /root/.gitconfig 中自动关联 GitHub CLI 凭据助手
 touch /root/.gitconfig
 if ! grep -q 'gh auth git-credential' /root/.gitconfig 2>/dev/null; then
   cat >>/root/.gitconfig <<'GITEOF'
@@ -226,7 +227,7 @@ if ! grep -q 'gh auth git-credential' /root/.gitconfig 2>/dev/null; then
 GITEOF
 fi
 
-# Force Codex CLI to persist auth tokens in /root/.codex/auth.json instead of OS keyring
+# 强制 Codex CLI 使用文件模式保存 auth.json，避免因无桌面 Keyring 导致掉登录
 if [ ! -f /root/.codex/config.toml ]; then
   printf 'cli_auth_credentials_store = "file"\n' >/root/.codex/config.toml
 elif ! grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=' /root/.codex/config.toml; then
@@ -264,44 +265,44 @@ for item in ${NORM_LIST}; do
   case "${item}" in
     claude|claude-code)
       if need_install claude; then
-        echo "[agent-init] Installing Claude Code CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 Claude Code CLI..."
         npm install -g --unsafe-perm --no-audit --no-fund "@anthropic-ai/claude-code@latest" \
           || curl -fsSL https://claude.ai/install.sh | bash
       fi
       ;;
     codex)
       if need_install codex; then
-        echo "[agent-init] Installing OpenAI Codex CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 OpenAI Codex CLI..."
         npm install -g --unsafe-perm --no-audit --no-fund "@openai/codex@latest"
       fi
       ;;
     gemini|gemini-cli)
       if need_install gemini; then
-        echo "[agent-init] Installing Google Gemini CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 Google Gemini CLI..."
         npm install -g --unsafe-perm --no-audit --no-fund "@google/gemini-cli@latest"
       fi
       ;;
     codebuddy|codebuddy-code)
       if need_install codebuddy; then
-        echo "[agent-init] Installing Tencent CodeBuddy CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 Tencent CodeBuddy CLI..."
         npm install -g --unsafe-perm --no-audit --no-fund "@tencent-ai/codebuddy-code@latest" \
           || curl -fsSL https://www.codebuddy.cn/cli/install.sh | bash
       fi
       ;;
     agy|antigravity)
       if need_install agy; then
-        echo "[agent-init] Installing Google Antigravity CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 Google Antigravity CLI..."
         curl -fsSL https://antigravity.google/cli/install.sh | bash
       fi
       ;;
     opencode|opencode-ai)
       if need_install opencode; then
-        echo "[agent-init] Installing OpenCode CLI (latest)..."
+        echo "[agent-init] 正在安装最新版 OpenCode CLI..."
         npm install -g --unsafe-perm --no-audit --no-fund "opencode-ai@latest"
       fi
       ;;
     *)
-      echo "[agent-init] Installing custom npm CLI package: ${item}..."
+      echo "[agent-init] 正在安装自定义 npm CLI 包: ${item}..."
       npm install -g --unsafe-perm --no-audit --no-fund "${item}"
       ;;
   esac
@@ -394,7 +395,7 @@ CONNECT_MARKER="${CONFIG_DIR}/.computer-connect-complete"
 mkdir -p "${CONFIG_DIR}"
 if [ ! -f "${CONNECT_MARKER}" ]; then
   if [ -z "${INSTALL_TOKEN:-}" ]; then
-    echo "INSTALL_TOKEN is required for the first container start." >&2
+    echo "首次启动容器必须提供 INSTALL_TOKEN 环境变量。" >&2
     exit 1
   fi
   hifox computer register --install-token "${INSTALL_TOKEN}" --yes --skip-service-restart
@@ -430,7 +431,7 @@ if [ "${ENABLE_GUI}" = "true" ] || [ "${ENABLE_GUI}" = "1" ]; then
     wait "${GUI_PID:-}" 2>/dev/null || true
     exit "${DAEMON_STATUS}"
   else
-    echo "[hifox] ENABLE_CC_SWITCH=true but cc-switch is not installed (slim image); starting daemon only."
+    echo "[hifox] 当前为精简镜像（未内置 cc-switch），跳过启动 Web GUI，仅运行守护进程。"
   fi
 fi
 
