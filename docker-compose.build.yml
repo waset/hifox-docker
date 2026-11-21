@@ -1,0 +1,9 @@
+# Optional override for building from local Dockerfile instead of pulling prebuilt GHCR images:
+# docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  hifox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WITH_CC_SWITCH: ${WITH_CC_SWITCH:-true}

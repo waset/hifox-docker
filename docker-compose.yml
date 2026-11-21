@@ -1,23 +1,32 @@
 services:
-  daemon:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: hifox-daemon
-    container_name: hifox-daemon
+  hifox:
+    image: ${HIFOX_IMAGE:-ghcr.io/waset/hifox-docker:latest}
+    container_name: ${HIFOX_CONTAINER_NAME:-hifox}
+    # Fixed hostname ensures hostname-salted encrypted OAuth tokens survive container recreation.
+    hostname: ${HIFOX_HOSTNAME:-hifox-daemon}
+    shm_size: "1gb"
     restart: unless-stopped
+    ports:
+      - "${CC_SWITCH_PORT:-3000}:3000"
     environment:
-      # Registration only; existing installs reuse the named HiFox volume.
+      # Required on first start only; persisted in hifox-config volume afterwards.
       INSTALL_TOKEN: ${INSTALL_TOKEN:-}
+      # Toggle Official CC-Switch Web GUI at runtime (true / false).
+      ENABLE_CC_SWITCH: ${ENABLE_CC_SWITCH:-true}
+      CC_SWITCH_VNC_PASSWORD: ${CC_SWITCH_VNC_PASSWORD:-}
+      # Optional comma-separated Agent CLIs to install into persisted /root/.local on startup
+      # Presets: claude, codex, gemini, codebuddy, agy, opencode (or any npm package name)
+      AGENT_CLIS: ${AGENT_CLIS:-}
+      AGENT_CLIS_UPDATE: ${AGENT_CLIS_UPDATE:-false}
+      GEMINI_FORCE_FILE_STORAGE: "true"
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
+      # Persist all runtime-installed Agent CLIs (/root/.local) and login states (gh, claude, codex, gemini, ssh, etc.)
+      - ./data:/root
+      # Native Linux ext4 volumes protect HiFox node state & CC-Switch SQLite DB from host filesystem lock issues
       - hifox-config:/root/.hifox
-      - ./data/cc-switch:/root/.cc-switch
-      - ./data/gh:/root/.config/gh
-      # Keep live configurations written by CC-Switch as well as its database.
-      - ./data/claude:/root/.claude
-      - ./data/codex:/root/.codex
-      - ./data/gemini:/root/.gemini # Also contains agy settings, not its keyring.
-      - ./data/codebuddy:/root/.codebuddy # Native CodeBuddy configuration.
+      - cc-switch-data:/root/.cc-switch
 
 volumes:
   hifox-config:
+  cc-switch-data:
