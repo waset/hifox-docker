@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate PR & Configs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Conventional Commit PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! printf '%s\n' "${PR_TITLE}" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_./-]+\))?!?: .+'; then
+            echo "::error::PR 标题必须遵循约定式提交规范，例如：feat: 新增某某功能 / fix(ci): 修复某某问题"
+            echo "当前标题: ${PR_TITLE}"
+            exit 1
+          fi
+
+      - name: Validate Docker Compose configurations
+        run: |
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.build.yml config >/dev/null
+
+      - name: Validate Markdown links
+        run: |
+          python3 -c '
+          import os, re
+          for dp, _, fns in os.walk("."):
+              if "/.git" in dp or "/data" in dp:
+                  continue
+              for fn in fns:
+                  if fn.endswith(".md"):
+                      p = os.path.join(dp, fn)
+                      txt = open(p, encoding="utf-8").read()
+                      for m in re.finditer(r"\]\((?!https?://|#)([^)]+)\)", txt):
+                          target = os.path.normpath(os.path.join(dp, m.group(1)))
+                          if not os.path.exists(target):
+                              raise SystemExit(f"Broken relative link in {p}: {m.group(1)}")
+          print("All Markdown relative links verified.")
+          '

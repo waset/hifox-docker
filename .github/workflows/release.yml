@@ -1,4 +1,4 @@
-name: Build Multi-Arch Images and Release
+name: Build Images and Publish Release
 
 on:
   push:
@@ -7,12 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "可选：输入新版本号（如 v1.0.1）以自动打 Tag 并发版；留空则仅刷新 latest / slim 镜像"
+        description: "可选：输入新版本号（如 v0.0.2）自动打 Tag 并发版；留空则仅刷新 latest / slim 镜像"
         required: false
         default: ""
         type: string
       no_cache:
-        description: "强制拉取上游最新版的 HiFox / CC-Switch / Node.js"
+        description: "跳过构建缓存以拉取上游最新版的 HiFox / CC-Switch / Node.js"
         required: false
         default: true
         type: boolean
@@ -43,7 +43,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare image context
+      - name: Prepare build context
         id: prep
         run: |
           repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
@@ -55,25 +55,25 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
             cachebust="$(date +%s)"
           fi
-          echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
           echo "with_cc_switch=${with_gui}" >> "$GITHUB_OUTPUT"
           echo "cachebust=${cachebust}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract OCI labels
+      - name: Extract OCI metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.prep.outputs.image }}
+          images: ${{ steps.prep.outputs.ghcr_image }}
 
       - name: Build and push by digest
         id: build
@@ -87,7 +87,7 @@ jobs:
           build-args: |
             WITH_CC_SWITCH=${{ steps.prep.outputs.with_cc_switch }}
             CACHEBUST=${{ steps.prep.outputs.cachebust }}
-          outputs: type=image,name=${{ steps.prep.outputs.image }},push=true,push-by-digest=true,name-canonical=true
+          outputs: type=image,name=${{ steps.prep.outputs.ghcr_image }},push=true,push-by-digest=true,name-canonical=true
           cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.platform.arch }}
 
@@ -105,14 +105,15 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish Manifests and GitHub Release
+    name: Publish Multi-Arch Images & Release
     needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
+      pull-requests: write
     env:
-      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+      DOCKERHUB_USER: ${{ vars.DOCKERHUB_USERNAME || 'waset' }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository (full history)
@@ -120,11 +121,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve version and image repository
+      - name: Resolve version and image names
         id: info
         run: |
           repo_lc="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${repo_lc}"
+          repo_name="${repo_lc#*/}"
+          ghcr_image="ghcr.io/${repo_lc}"
+          dh_image="${DOCKERHUB_USER}/${repo_name}"
           tag=""
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             tag="${GITHUB_REF_NAME}"
@@ -141,8 +144,10 @@ jobs:
               git push origin "${tag}"
             fi
           fi
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=${ghcr_image}" >> "$GITHUB_OUTPUT"
+          echo "dh_image=${dh_image}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "clean_ver=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download digest artifacts
         uses: actions/download-artifact@v4
@@ -154,25 +159,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub (optional)
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+      - name: Log in to Docker Hub (Primary)
+        if: ${{ env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create and push multi-arch manifests
+      - name: Publish multi-arch manifests to Docker Hub & GHCR
         id: manifests
         run: |
           set -euo pipefail
-          IMAGE="${{ steps.info.outputs.image }}"
+          GHCR_IMAGE="${{ steps.info.outputs.ghcr_image }}"
+          DH_IMAGE="${{ steps.info.outputs.dh_image }}"
           TAG="${{ steps.info.outputs.tag }}"
           REPO_URL="https://github.com/${{ github.repository }}"
 
@@ -181,139 +187,128 @@ jobs:
           SLIM_AMD64="$(cat "${{ runner.temp }}/digests/slim-amd64")"
           SLIM_ARM64="$(cat "${{ runner.temp }}/digests/slim-arm64")"
 
-          FULL_TAGS=("-t" "${IMAGE}:latest")
-          SLIM_TAGS=("-t" "${IMAGE}:slim")
+          FULL_TAGS=("-t" "${GHCR_IMAGE}:latest")
+          SLIM_TAGS=("-t" "${GHCR_IMAGE}:slim")
 
           if [ -n "${TAG}" ]; then
             CLEAN_VER="${TAG#v}"
-            FULL_TAGS+=("-t" "${IMAGE}:${TAG}" "-t" "${IMAGE}:${CLEAN_VER}")
-            SLIM_TAGS+=("-t" "${IMAGE}:${TAG}-slim" "-t" "${IMAGE}:${CLEAN_VER}-slim")
-            if [[ "${CLEAN_VER}" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
-              MAJOR_MINOR="${BASH_REMATCH[1]}"
-              FULL_TAGS+=("-t" "${IMAGE}:${MAJOR_MINOR}")
-              SLIM_TAGS+=("-t" "${IMAGE}:${MAJOR_MINOR}-slim")
-            fi
+            FULL_TAGS+=("-t" "${GHCR_IMAGE}:${TAG}" "-t" "${GHCR_IMAGE}:${CLEAN_VER}")
+            SLIM_TAGS+=("-t" "${GHCR_IMAGE}:${TAG}-slim" "-t" "${GHCR_IMAGE}:${CLEAN_VER}-slim")
           fi
 
-          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-            DH_IMAGE="${DOCKERHUB_USERNAME}/hifox-docker"
+          if [ -n "${DOCKERHUB_TOKEN:-}" ]; then
             FULL_TAGS+=("-t" "${DH_IMAGE}:latest")
             SLIM_TAGS+=("-t" "${DH_IMAGE}:slim")
             if [ -n "${TAG}" ]; then
-              FULL_TAGS+=("-t" "${DH_IMAGE}:${TAG}")
-              SLIM_TAGS+=("-t" "${DH_IMAGE}:${TAG}-slim")
+              CLEAN_VER="${TAG#v}"
+              FULL_TAGS+=("-t" "${DH_IMAGE}:${TAG}" "-t" "${DH_IMAGE}:${CLEAN_VER}")
+              SLIM_TAGS+=("-t" "${DH_IMAGE}:${TAG}-slim" "-t" "${DH_IMAGE}:${CLEAN_VER}-slim")
             fi
           fi
 
           docker buildx imagetools create \
             --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
-            --annotation "index:org.opencontainers.image.description=HiFox Docker Node Environment with Official CC-Switch Web GUI" \
+            --annotation "index:org.opencontainers.image.description=HiFox 容器化节点公共环境（含官方 CC-Switch Web GUI）" \
             "${FULL_TAGS[@]}" \
-            "${IMAGE}@${FULL_AMD64}" \
-            "${IMAGE}@${FULL_ARM64}"
+            "${GHCR_IMAGE}@${FULL_AMD64}" \
+            "${GHCR_IMAGE}@${FULL_ARM64}"
 
           docker buildx imagetools create \
             --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
-            --annotation "index:org.opencontainers.image.description=HiFox Docker Node Environment (Slim Headless)" \
+            --annotation "index:org.opencontainers.image.description=HiFox 容器化节点公共环境（精简无头版）" \
             "${SLIM_TAGS[@]}" \
-            "${IMAGE}@${SLIM_AMD64}" \
-            "${IMAGE}@${SLIM_ARM64}"
-
-          FULL_INDEX_DIGEST="sha256:$(docker buildx imagetools inspect "${IMAGE}:latest" --raw | sha256sum | awk '{print $1}')"
-          SLIM_INDEX_DIGEST="sha256:$(docker buildx imagetools inspect "${IMAGE}:slim" --raw | sha256sum | awk '{print $1}')"
+            "${GHCR_IMAGE}@${SLIM_AMD64}" \
+            "${GHCR_IMAGE}@${SLIM_ARM64}"
 
           echo "full_amd64=${FULL_AMD64}" >> "$GITHUB_OUTPUT"
-          echo "full_arm64=${FULL_ARM64}" >> "$GITHUB_OUTPUT"
-          echo "full_digest=${FULL_INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "slim_digest=${SLIM_INDEX_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync README description to Docker Hub
+        if: ${{ env.DOCKERHUB_TOKEN != '' }}
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.info.outputs.dh_image }}
+          readme-filepath: ./README.md
 
       - name: Extract built-in component versions
         id: versions
         run: |
           set -euo pipefail
-          IMAGE="${{ steps.info.outputs.image }}"
-          FULL_AMD64="${{ steps.manifests.outputs.full_amd64 }}"
-          VERS_JSON="$(docker run --rm --entrypoint cat "${IMAGE}@${FULL_AMD64}" /etc/hifox-versions.json)"
-          echo "Versions JSON: ${VERS_JSON}"
-          echo "hifox=$(printf '%s' "${VERS_JSON}" | jq -r '.hifox')" >> "$GITHUB_OUTPUT"
-          echo "cc_switch=$(printf '%s' "${VERS_JSON}" | jq -r '.cc_switch')" >> "$GITHUB_OUTPUT"
-          echo "node=$(printf '%s' "${VERS_JSON}" | jq -r '.node')" >> "$GITHUB_OUTPUT"
-          echo "npm=$(printf '%s' "${VERS_JSON}" | jq -r '.npm')" >> "$GITHUB_OUTPUT"
-          echo "gh=$(printf '%s' "${VERS_JSON}" | jq -r '.gh')" >> "$GITHUB_OUTPUT"
+          GHCR_IMAGE="${{ steps.info.outputs.ghcr_image }}"
+          FULL_JSON="$(docker run --rm --entrypoint cat "${GHCR_IMAGE}@${{ steps.manifests.outputs.full_amd64 }}" /etc/hifox-versions.json)"
+          echo "hifox=$(printf '%s' "${FULL_JSON}" | jq -r '.hifox')" >> "$GITHUB_OUTPUT"
+          echo "cc_switch=$(printf '%s' "${FULL_JSON}" | jq -r '.cc_switch')" >> "$GITHUB_OUTPUT"
+          echo "node=$(printf '%s' "${FULL_JSON}" | jq -r '.node')" >> "$GITHUB_OUTPUT"
+          echo "npm=$(printf '%s' "${FULL_JSON}" | jq -r '.npm')" >> "$GITHUB_OUTPUT"
+          echo "gh=$(printf '%s' "${FULL_JSON}" | jq -r '.gh')" >> "$GITHUB_OUTPUT"
 
-      - name: Package deployment assets and publish GitHub Release
+      - name: Compile changelog via Release Drafter
+        id: drafter
+        if: ${{ steps.info.outputs.tag != '' }}
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+          version: ${{ steps.info.outputs.clean_ver }}
+          tag: ${{ steps.info.outputs.tag }}
+          publish: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize and publish GitHub Release
         if: ${{ steps.info.outputs.tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRAFTER_BODY: ${{ steps.drafter.outputs.body }}
+          DRAFTER_ID: ${{ steps.drafter.outputs.id }}
         run: |
           set -euo pipefail
           TAG="${{ steps.info.outputs.tag }}"
-          IMAGE="${{ steps.info.outputs.image }}"
-          FULL_DIGEST="${{ steps.manifests.outputs.full_digest }}"
-          SLIM_DIGEST="${{ steps.manifests.outputs.slim_digest }}"
+          DH_IMAGE="${{ steps.info.outputs.dh_image }}"
+          GHCR_IMAGE="${{ steps.info.outputs.ghcr_image }}"
 
-          STAGE_DIR="dist/hifox-docker-${TAG}"
-          mkdir -p "${STAGE_DIR}"
+          mkdir -p dist
+          sed "s|waset/hifox-docker:latest|${DH_IMAGE}:${TAG}|g" docker-compose.yml > dist/docker-compose.yml
+          sed "s|waset/hifox-docker:latest|${DH_IMAGE}:${TAG}|g" .env.example > dist/.env.example
 
-          sed "s|ghcr.io/waset/hifox-docker:latest|${IMAGE}:${TAG}|g" docker-compose.yml > "${STAGE_DIR}/docker-compose.yml"
-          sed "s|ghcr.io/waset/hifox-docker:latest|${IMAGE}:${TAG}|g" .env.example > "${STAGE_DIR}/.env.example"
-          cp README.md "${STAGE_DIR}/README.md"
-
-          cp "${STAGE_DIR}/docker-compose.yml" "dist/docker-compose.yml"
-          cp "${STAGE_DIR}/.env.example" "dist/.env.example"
-
-          tar -C dist -czf "dist/hifox-docker-deploy-${TAG}.tar.gz" "hifox-docker-${TAG}"
-          (cd dist && zip -rq "hifox-docker-deploy-${TAG}.zip" "hifox-docker-${TAG}")
-          (cd dist && sha256sum \
-            "hifox-docker-deploy-${TAG}.tar.gz" \
-            "hifox-docker-deploy-${TAG}.zip" \
-            "docker-compose.yml" \
-            ".env.example" > SHA256SUMS.txt)
-
-          PREV_TAG="$(git tag --sort=-v:refname | grep -E '^v[0-9]+' | grep -Fxv "${TAG}" | head -n 1 || true)"
-          if [ -n "${PREV_TAG}" ]; then
-            LOG_RANGE="${PREV_TAG}..${TAG}"
-          else
-            LOG_RANGE="${TAG}"
+          CHANGELOG_SECTION="${DRAFTER_BODY}"
+          if printf '%s' "${CHANGELOG_SECTION}" | grep -q '\* No changes'; then
+            PREV_TAG="$(git tag --sort=-v:refname | grep -E '^v[0-9]+' | grep -Fxv "${TAG}" | head -n 1 || true)"
+            RANGE="${PREV_TAG:+${PREV_TAG}..}${TAG}"
+            FALLBACK_COMMITS="$(git log "${RANGE}" --no-merges --pretty=format:'- %s (`%h`)')"
+            CHANGELOG_SECTION="$(printf "## 🚀 更新内容\n\n%s\n\n**完整变更记录**: https://github.com/%s/compare/%s...%s" \
+              "${FALLBACK_COMMITS}" "${{ github.repository }}" "${PREV_TAG:-v0.0.1}" "${TAG}")"
           fi
-
-          COMMITS="$(git log "${LOG_RANGE}" --no-merges --pretty=format:'- %s (`%h`)')"
 
           {
-            printf '## 🐳 Docker 镜像地址（支持 `linux/amd64` & `linux/arm64`）\n\n'
-            printf '| 版本类型 | 镜像地址（固定版本） | 镜像地址（滚动标签） | 多架构 Manifest Digest |\n'
-            printf '| :--- | :--- | :--- | :--- |\n'
-            printf '| **全功能版**（含官方 CC-Switch Web GUI） | `%s:%s` | `%s:latest` | `%s` |\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${FULL_DIGEST}"
-            printf '| **精简版**（纯无头节点，无 GUI 依赖） | `%s:%s-slim` | `%s:slim` | `%s` |\n\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${SLIM_DIGEST}"
-            printf '### 一键拉取\n\n```bash\n# 全功能版（推荐）\ndocker pull %s:%s\n\n# 精简无 GUI 版\ndocker pull %s:%s-slim\n```\n\n---\n\n' "${IMAGE}" "${TAG}" "${IMAGE}" "${TAG}"
-            printf '## 📦 内置核心组件版本快照\n\n'
-            printf '| 组件 | 版本 |\n| :--- | :--- |\n'
-            printf '| **HiFox CLI** | `%s` |\n' "${{ steps.versions.outputs.hifox }}"
-            printf '| **CC-Switch (官方桌面版)** | `%s` *(仅全功能版内置)* |\n' "${{ steps.versions.outputs.cc_switch }}"
-            printf '| **Node.js / npm** | `%s` / `%s` |\n' "${{ steps.versions.outputs.node }}" "${{ steps.versions.outputs.npm }}"
-            printf '| **GitHub CLI (`gh`)** | `%s` |\n\n---\n\n' "${{ steps.versions.outputs.gh }}"
-            printf '## 🚀 快速部署（使用本 Release 附件）\n\n```bash\n'
-            printf 'curl -fsSLO https://github.com/%s/releases/download/%s/hifox-docker-deploy-%s.tar.gz\n' "${{ github.repository }}" "${TAG}" "${TAG}"
-            printf 'tar -xzf hifox-docker-deploy-%s.tar.gz\ncd hifox-docker-%s\ncp .env.example .env\n# 编辑 .env 填入 INSTALL_TOKEN 后启动：\ndocker compose up -d\n```\n\n---\n\n' "${TAG}" "${TAG}"
-            printf '## 📝 变更记录（Changelog）\n\n%s\n' "${COMMITS}"
+            printf '%s\n\n' "${CHANGELOG_SECTION}"
+            printf '## 📦 内置组件版本\n\n'
+            printf '| 组件 | `latest` 全功能版 | `slim` 精简版 |\n'
+            printf '| :--- | :--- | :--- |\n'
+            printf '| HiFox CLI | `%s` | `%s` |\n' "${{ steps.versions.outputs.hifox }}" "${{ steps.versions.outputs.hifox }}"
+            printf '| CC-Switch | `%s` | `-` |\n' "${{ steps.versions.outputs.cc_switch }}"
+            printf '| Node.js / npm | `%s` / `%s` | `%s` / `%s` |\n' \
+              "${{ steps.versions.outputs.node }}" "${{ steps.versions.outputs.npm }}" \
+              "${{ steps.versions.outputs.node }}" "${{ steps.versions.outputs.npm }}"
+            printf '| GitHub CLI (`gh`) | `%s` | `%s` |\n\n' "${{ steps.versions.outputs.gh }}" "${{ steps.versions.outputs.gh }}"
+            printf '## 🐳 容器镜像（`linux/amd64`, `linux/arm64`）\n\n'
+            printf -- '- **Docker Hub（主源）**: `%s:%s` · `%s:%s-slim`\n' "${DH_IMAGE}" "${TAG}" "${DH_IMAGE}" "${TAG}"
+            printf -- '- **GHCR（备用源）**: `%s:%s` · `%s:%s-slim`\n' "${GHCR_IMAGE}" "${TAG}" "${GHCR_IMAGE}" "${TAG}"
           } > dist/release-notes.md
 
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --title "${TAG}" --notes-file dist/release-notes.md
-            gh release upload "${TAG}" \
-              "dist/hifox-docker-deploy-${TAG}.tar.gz" \
-              "dist/hifox-docker-deploy-${TAG}.zip" \
-              "dist/docker-compose.yml" \
-              "dist/.env.example" \
-              "dist/SHA256SUMS.txt" \
-              --clobber
+          if [ -n "${DRAFTER_ID:-}" ]; then
+            jq -n \
+              --arg tag "${TAG}" \
+              --rawfile body dist/release-notes.md \
+              '{tag_name: $tag, name: $tag, draft: false, body: $body}' \
+              | gh api --method PATCH "repos/${{ github.repository }}/releases/${DRAFTER_ID}" --input - >/dev/null
+          elif gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --title "${TAG}" --notes-file dist/release-notes.md --draft=false
           else
-            gh release create "${TAG}" \
-              "dist/hifox-docker-deploy-${TAG}.tar.gz" \
-              "dist/hifox-docker-deploy-${TAG}.zip" \
-              "dist/docker-compose.yml" \
-              "dist/.env.example" \
-              "dist/SHA256SUMS.txt" \
-              --title "${TAG}" \
-              --notes-file dist/release-notes.md
+            gh release create "${TAG}" --title "${TAG}" --notes-file dist/release-notes.md
           fi
+
+          gh release upload "${TAG}" \
+            "dist/docker-compose.yml#docker-compose.yml" \
+            "dist/.env.example#.env.example" \
+            --clobber
