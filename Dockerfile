@@ -16,7 +16,7 @@ ENV HOME="/root" \
     LANG="C.UTF-8" \
     PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 1. Base runtime tools and dynamically resolved latest LTS Node.js
+# 1. Base runtime toolchain and dynamically resolved latest LTS Node.js
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
      ca-certificates \
@@ -51,12 +51,13 @@ RUN install -d -m 0755 /etc/apt/keyrings \
   && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-# 3. HiFox CLI (latest) installed into /usr/local/bin so mounting /root never shadows it
+# 3. HiFox CLI (latest) relocated to /usr/local/bin so /root volume mounts never shadow it
 RUN NPM_CONFIG_PREFIX="/usr/local" curl -fsSL https://file-assets.hifox.com/download/install.sh | bash \
   && install -m 0755 "$(readlink -f /root/.local/bin/hifox)" /usr/local/bin/hifox \
   && rm -rf /root/.local /root/.npm /root/.cache /root/.config
 
 # 4. Optional Official CC-Switch Desktop (farion1231/cc-switch latest) + Web GUI stack
+#    Intentionally excludes gnome-keyring so CLIs never store tokens in ephemeral memory keyrings.
 RUN set -eu; \
   if [ "${WITH_CC_SWITCH}" = "true" ]; then \
     apt-get update; \
@@ -113,8 +114,8 @@ RUN set -eu; \
       'if [ -n "${target}" ]; then' \
       '  printf "%s" "${target}" | xclip -selection clipboard 2>/dev/null || true' \
       '  zenity --entry \' \
-      '    --title="打开链接 (已复制到剪贴板)" \' \
-      '    --text="请复制以下链接到宿主机浏览器中打开完成授权或访问：" \' \
+      '    --title="Open URL (Copied to Clipboard)" \' \
+      '    --text="Copy and open this URL in your host browser to complete authorization:" \' \
       '    --entry-text="${target}" \' \
       '    --width=640 >/dev/null 2>&1 &' \
       'fi' \
@@ -150,7 +151,7 @@ RUN set -eu; \
   if dpkg-query -W -f='${Version}' cc-switch >/dev/null 2>&1; then \
     cc_ver="$(dpkg-query -W -f='${Version}' cc-switch)"; \
   else \
-    cc_ver="none (slim)"; \
+    cc_ver="-"; \
   fi; \
   jq -n \
     --arg node "${node_ver}" \
@@ -162,7 +163,7 @@ RUN set -eu; \
     >/etc/hifox-versions.json \
   && cat /etc/hifox-versions.json
 
-# 6. Persistence, on-demand Agent CLI installer, GUI runner, and unified entrypoint
+# 6. Persistence initializer, on-demand Agent CLI installer, GUI supervisor, and unified entrypoint
 RUN cat >/usr/local/bin/hifox-init-persistence <<'EOF'
 #!/bin/sh
 set -eu
@@ -181,7 +182,7 @@ mkdir -p \
   /root/.ssh
 chmod 700 /root/.ssh
 
-# Seed default shell rc files when /root is mounted from an empty host directory
+# Seed default shell rc files when /root is freshly mounted from an empty host directory
 if [ ! -f /root/.bashrc ] && [ -f /etc/skel/.bashrc ]; then
   cp /etc/skel/.bashrc /root/.bashrc
 fi
@@ -189,7 +190,7 @@ if [ ! -f /root/.profile ] && [ -f /etc/skel/.profile ]; then
   cp /etc/skel/.profile /root/.profile
 fi
 
-# Persist /etc/machine-id across container rebuilds so device-bound encrypted tokens stay valid
+# Persist /etc/machine-id across container rebuilds so device-salted encrypted tokens remain valid
 MACHINE_ID_FILE="/root/.config/machine-id"
 if [ ! -s "${MACHINE_ID_FILE}" ]; then
   if [ -s /etc/machine-id ]; then
@@ -203,7 +204,7 @@ if [ -d /var/lib/dbus ]; then
   cp "${MACHINE_ID_FILE}" /var/lib/dbus/machine-id
 fi
 
-# Keep /root/.claude.json and /root/.claude/.claude.json unified for Claude Code & CC-Switch
+# Unify /root/.claude.json and /root/.claude/.claude.json for Claude Code & CC-Switch
 if [ ! -f /root/.claude/.claude.json ]; then
   if [ -f /root/.claude.json ] && [ ! -L /root/.claude.json ]; then
     mv /root/.claude.json /root/.claude/.claude.json
@@ -213,7 +214,7 @@ if [ ! -f /root/.claude/.claude.json ]; then
 fi
 ln -sfn /root/.claude/.claude.json /root/.claude.json
 
-# Persist Git credential helper for GitHub CLI inside /root/.gitconfig
+# Wire GitHub CLI credential helper into persistent /root/.gitconfig
 touch /root/.gitconfig
 if ! grep -q 'gh auth git-credential' /root/.gitconfig 2>/dev/null; then
   cat >>/root/.gitconfig <<'GITEOF'
@@ -226,7 +227,7 @@ if ! grep -q 'gh auth git-credential' /root/.gitconfig 2>/dev/null; then
 GITEOF
 fi
 
-# Force Codex CLI to persist auth tokens in /root/.codex/auth.json instead of OS keyring
+# Configure Codex CLI to persist auth tokens in /root/.codex/auth.json instead of OS keyring
 if [ ! -f /root/.codex/config.toml ]; then
   printf 'cli_auth_credentials_store = "file"\n' >/root/.codex/config.toml
 elif ! grep -Eq '^[[:space:]]*cli_auth_credentials_store[[:space:]]*=' /root/.codex/config.toml; then
