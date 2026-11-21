@@ -146,7 +146,7 @@ RUN set -eu; \
   node_ver="$(node --version)"; \
   npm_ver="$(npm --version)"; \
   gh_ver="$(gh --version | head -n 1 | awk '{print $3}')"; \
-  hifox_ver="$(hifox --version | head -n 1 | awk '{print $NF}')"; \
+  hifox_ver="$(hifox --version | head -n 1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?' | head -n 1)"; \
   if dpkg-query -W -f='${Version}' cc-switch >/dev/null 2>&1; then \
     cc_ver="$(dpkg-query -W -f='${Version}' cc-switch)"; \
   else \
