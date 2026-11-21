@@ -111,6 +111,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository (full history)
         uses: actions/checkout@v4
@@ -159,7 +162,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub (optional)
-        if: ${{ vars.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
@@ -192,8 +195,8 @@ jobs:
             fi
           fi
 
-          if [ -n "${{ vars.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            DH_IMAGE="${{ vars.DOCKERHUB_USERNAME }}/hifox-docker"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            DH_IMAGE="${DOCKERHUB_USERNAME}/hifox-docker"
             FULL_TAGS+=("-t" "${DH_IMAGE}:latest")
             SLIM_TAGS+=("-t" "${DH_IMAGE}:slim")
             if [ -n "${TAG}" ]; then
