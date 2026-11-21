@@ -1,153 +1,98 @@
 # hifox-docker
 
+简体中文 | [English](README.en.md)
+
+[![Docker Hub](https://img.shields.io/docker/v/waset/hifox-docker?sort=semver&logo=docker&label=docker%20hub)](https://hub.docker.com/r/waset/hifox-docker)
+[![Docker Pulls](https://img.shields.io/docker/pulls/waset/hifox-docker?logo=docker)](https://hub.docker.com/r/waset/hifox-docker)
+[![GHCR](https://img.shields.io/badge/ghcr.io-fallback-blue?logo=github)](https://github.com/waset/hifox-docker/pkgs/container/hifox-docker)
 [![Release](https://img.shields.io/github/v/release/waset/hifox-docker?logo=github)](https://github.com/waset/hifox-docker/releases)
-[![Build](https://img.shields.io/github/actions/workflow/status/waset/hifox-docker/release.yml?logo=docker&label=build)](https://github.com/waset/hifox-docker/actions/workflows/release.yml)
-[![Arch](https://img.shields.io/badge/arch-linux%2Famd64%20%7C%20linux%2Farm64-blue)](#一镜像版本选择)
+[![Build](https://img.shields.io/github/actions/workflow/status/waset/hifox-docker/release.yml?logo=githubactions&label=build)](https://github.com/waset/hifox-docker/actions/workflows/release.yml)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-informational)](#镜像版本)
 
-开箱即用的 **HiFox 容器化节点运行环境**，内置 `hifox`、`Node.js（LTS）`、`git`、`gh`、`python3` 等基础工具，可选集成官方原版 **`farion1231/cc-switch` Web 图形界面**。默认不预装具体 AI Agent CLI，所有按需安装的 CLI 及其登录态均自动持久化。
+开箱即用的 **HiFox 容器化节点公共运行环境**，可选内置官方原版 CC-Switch Web 图形界面，默认不预装具体 Agent CLI，完整支持按需安装 CLI 及各类工具登录态持久化。
 
----
+## 镜像版本
 
-## 一、镜像版本选择
+- `:latest` — 全功能版，内置 HiFox 节点守护进程、基础命令行工具链及官方 CC-Switch Web GUI（可通过 `ENABLE_CC_SWITCH` 动态开关 GUI）。
+- `:slim` — 精简无头版，仅包含 HiFox 节点守护进程与基础命令行环境，不含任何 X11 / WebKit / VNC 依赖。
 
-均原生支持 `linux/amd64` 与 `linux/arm64`（Apple Silicon / ARM 服务器）：
+## 支持的工具与 Agent CLI
 
-| 镜像标签 | 镜像地址 | 适用场景 |
-| :--- | :--- | :--- |
-| **`latest`** *(推荐)* | `ghcr.io/waset/hifox-docker:latest` | **全功能版**：内置 HiFox + 官方 CC-Switch Web GUI（可通过 `ENABLE_CC_SWITCH=false` 动态关闭 GUI） |
-| **`slim`** | `ghcr.io/waset/hifox-docker:slim` | **精简无头版**：仅含 HiFox + 基础命令行环境，不含任何 GUI 依赖，体积更小 |
+点击下方条目查看对应工具的官网链接、本镜像持久化配置及常用命令说明：
 
----
+- [HiFox CLI (`hifox`)](doc/hifox.md) — 内置节点注册与后台任务执行守护进程
+- [CC-Switch (`cc-switch`)](doc/cc-switch.md) — 内置官方可视化供应商、MCP 与 WebDAV 同步管理工具（`:latest` 版本）
+- [GitHub CLI & Git (`gh`, `git`, `ssh`)](doc/github-cli.md) — 内置 GitHub CLI、Git 凭据助手联动与 SSH 密钥持久化
+- [Claude Code (`claude`)](doc/claude-code.md) — 按需安装（`AGENT_CLIS=claude`）与登录态持久化说明
+- [OpenAI Codex (`codex`)](doc/codex.md) — 按需安装（`AGENT_CLIS=codex`）与文件级凭证持久化说明
+- [Google Gemini CLI (`gemini`)](doc/gemini-cli.md) — 按需安装（`AGENT_CLIS=gemini`）与绑定主机名的加密文件凭证说明
+- [Tencent CodeBuddy (`codebuddy`)](doc/codebuddy.md) — 按需安装（`AGENT_CLIS=codebuddy`）与 XDG 登录态持久化说明
+- [Google Antigravity CLI (`agy`)](doc/antigravity.md) — 按需安装（`AGENT_CLIS=agy`）与机器指纹绑定凭证说明
+- [OpenCode 及自定义 npm CLI (`opencode` 等)](doc/opencode.md) — 按需安装与 `/root/.local` 全局持久化说明
 
-## 二、三步快速部署
+## 快速启动
 
-无需克隆源码或本地构建，直接拉取镜像即可运行：
-
-### 1. 下载部署配置
+### Docker Run
 
 ```bash
-mkdir -p hifox && cd hifox
-curl -fsSLO https://raw.githubusercontent.com/waset/hifox-docker/main/docker-compose.yml
-curl -fsSLO https://raw.githubusercontent.com/waset/hifox-docker/main/.env.example
-cp .env.example .env
+docker run -d \
+  --name hifox \
+  --hostname hifox-daemon \
+  --shm-size 1g \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -e INSTALL_TOKEN="your_install_token" \
+  -e ENABLE_CC_SWITCH="true" \
+  -e CC_SWITCH_VNC_PASSWORD="" \
+  -e AGENT_CLIS="" \
+  -e TZ="Asia/Shanghai" \
+  -v "$(pwd)/data:/root" \
+  -v hifox-config:/root/.hifox \
+  -v cc-switch-data:/root/.cc-switch \
+  <image>:latest
 ```
 
-### 2. 配置 `.env`
+### Docker Compose
 
-编辑 `.env`，填入首次注册所需的 `INSTALL_TOKEN`（注册完成后节点凭证持久保存在卷中，后续重启可留空）：
+将 `docker-compose.yml` 与 `.env` 文件放置在同一工作目录下，直接执行：
+
+```bash
+docker compose up -d
+```
+
+## 环境变量说明
+
+使用 Docker Compose 时，在 `docker-compose.yml` 同级目录放置 `.env` 文件（使用 `docker run` 时通过 `-e` 传入）：
+
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `INSTALL_TOKEN` | *(空)* | 首次启动注册 HiFox 节点所需的一次性安装令牌 |
+| `HIFOX_IMAGE` | *(主源 `:latest`)* | 容器镜像引用（可切换为 `:slim` 无头版，或在网络不通时切换为 GHCR 备用源） |
+| `ENABLE_CC_SWITCH` | `true` | 是否启动内置官方 CC-Switch Web GUI（设为 `false` 时不拉起任何 GUI 进程，零额外内存开销） |
+| `CC_SWITCH_PORT` | `3000` | CC-Switch Web GUI 映射至宿主机的端口（`http://localhost:3000`） |
+| `CC_SWITCH_VNC_PASSWORD` | *(空)* | 可选的 Web GUI 访问密码（公网环境建议配置） |
+| `AGENT_CLIS` | *(空)* | 启动时自动安装到 `/root/.local` 的 CLI 列表，逗号分隔（支持 `claude,codex,gemini,codebuddy,agy,opencode` 或任意 npm 包名） |
+| `AGENT_CLIS_UPDATE` | `false` | 每次容器启动时是否强制将 `AGENT_CLIS` 升级至最新版（`true` / `false`） |
+| `HIFOX_HOSTNAME` | `hifox-daemon` | 容器固定主机名（登录 CLI 后请勿随意更改，避免依赖主机名派生的加密 Token 失效） |
+| `TZ` | `Asia/Shanghai` | 容器时区 |
+
+`.env` 文件放置示例（与 `docker-compose.yml` 同目录）：
 
 ```dotenv
 INSTALL_TOKEN=sit_xxxxxxxxxxxxxxxxxxxx
+ENABLE_CC_SWITCH=true
 CC_SWITCH_PORT=3000
 CC_SWITCH_VNC_PASSWORD=
 AGENT_CLIS=
 ```
 
-### 3. 启动服务
+## 持久化目录说明
 
-```bash
-docker compose pull
-docker compose up -d
-```
+- `./data:/root` — 持久化运行时安装的 Agent CLI（`/root/.local/bin`）、全局 npm 包、`gh` 登录凭证、`.gitconfig`、`.ssh`、`machine-id` 及所有 `~/.<agent>` 登录状态。
+- `hifox-config:/root/.hifox` — 原生 Linux 命名卷，保存 HiFox 节点注册凭证与运行状态。
+- `cc-switch-data:/root/.cc-switch` — 原生 Linux 命名卷，保存官方 CC-Switch 的 SQLite 数据库与备份。
 
-- **CC-Switch Web 界面**：浏览器打开 `http://localhost:3000`（点击界面内授权链接会自动复制并弹出链接框，粘贴至宿主机浏览器即可完成授权）。
+## 致谢
 
----
-
-## 三、安装与登录 Agent CLI
-
-镜像默认不预装 Agent CLI，安装后的二进制自动持久保存在 `./data/.local/bin` 中，升级镜像不会丢失。
-
-### 方式 1：通过 `.env` 启动时自动安装
-
-修改 `.env` 中的 `AGENT_CLIS`（支持 `claude`、`codex`、`gemini`、`codebuddy`、`agy`、`opencode` 或任意 npm 包名），重启生效：
-
-```dotenv
-AGENT_CLIS=claude,codex,gemini
-```
-
-```bash
-docker compose up -d
-```
-
-### 方式 2：进入容器手动安装
-
-```bash
-docker exec -it hifox bash
-
-# 按需选择安装
-npm install -g @anthropic-ai/claude-code@latest
-npm install -g @openai/codex@latest
-npm install -g @google/gemini-cli@latest
-npm install -g @tencent-ai/codebuddy-code@latest
-curl -fsSL https://antigravity.google/cli/install.sh | bash
-```
-
-### 各工具登录速查（登录态均自动持久化）
-
-```bash
-docker exec -it hifox bash
-
-gh auth login --insecure-storage   # GitHub CLI（自动关联 Git 凭据）
-claude login                       # Claude Code
-codex login --device-auth          # OpenAI Codex（自动落盘至 auth.json）
-gemini                             # Google Gemini CLI（已启用文件存储模式）
-codebuddy                          # Tencent CodeBuddy
-agy                                # Google Antigravity CLI
-```
-
----
-
-## 四、常用运维命令
-
-```bash
-# 查看运行日志
-docker compose logs -f
-
-# 拉取最新镜像并无损升级容器（保留所有已装 CLI 与登录态）
-docker compose pull && docker compose up -d
-
-# 仅运行后台节点、关闭 CC-Switch Web GUI（修改 .env 中 ENABLE_CC_SWITCH=false 后执行）
-docker compose up -d
-
-# 停止服务（切勿加 -v，避免删除节点注册卷和 CC-Switch 数据库卷）
-docker compose down
-
-# （开发者可选）基于本地 Dockerfile 构建运行
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
-```
-
----
-
-## 五、环境变量说明
-
-| 变量名 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `INSTALL_TOKEN` | *(空)* | 首次启动注册 HiFox 节点的短期安装令牌 |
-| `HIFOX_IMAGE` | `ghcr.io/waset/hifox-docker:latest` | 运行镜像（可改为 `:slim` 或指定固定版本如 `:v0.0.1`） |
-| `ENABLE_CC_SWITCH` | `true` | 是否启动内置官方 CC-Switch Web GUI（`false` 时零 GUI 内存占用） |
-| `CC_SWITCH_PORT` | `3000` | Web GUI 映射宿主机端口 |
-| `CC_SWITCH_VNC_PASSWORD` | *(空)* | Web GUI 访问密码（公网部署强烈建议设置） |
-| `AGENT_CLIS` | *(空)* | 启动时按需自动安装的 CLI 列表，逗号分隔 |
-| `AGENT_CLIS_UPDATE` | `false` | 每次启动容器时是否强制升级 `AGENT_CLIS` 至最新版 |
-| `HIFOX_HOSTNAME` | `hifox-daemon` | 容器固定主机名（请勿随意修改，防止基于主机名加密的 Token 失效） |
-| `TZ` | `Asia/Shanghai` | 容器时区 |
-
----
-
-## 六、数据与登录态持久化结构
-
-```text
-.
-├── data/                        # 映射至容器 /root（所有运行时安装的 CLI 与登录配置）
-│   ├── .local/                  # 按需安装的 Agent CLI 二进制、npm 全局包及 XDG 状态
-│   ├── .config/                 # gh 登录配置（hosts.yml）及固定机器指纹（machine-id）
-│   ├── .gitconfig               # Git 全局配置与 gh 凭据助手
-│   ├── .ssh/                    # SSH 密钥对与 known_hosts
-│   ├── .claude/ & .claude.json  # Claude Code 登录态与会话配置
-│   ├── .codex/                  # Codex 登录态（auth.json）与配置
-│   ├── .gemini/                 # Gemini CLI 与 Antigravity 登录态
-│   └── .codebuddy/              # CodeBuddy 配置
-├── Volume: hifox-config         # 映射至 /root/.hifox（HiFox 节点注册凭证与运行态）
-└── Volume: cc-switch-data       # 映射至 /root/.cc-switch（官方 CC-Switch SQLite 数据库与备份）
-```
+- [HiFox](https://www.hifox.com) — 面向 AI 编程智能体的协同工作空间与节点编排平台。
+- [CC-Switch](https://ccswitch.io)（[GitHub](https://github.com/farion1231/cc-switch)）— 官方跨平台 AI 编程 CLI 配置、供应商与 MCP 管理工具。
